@@ -1,0 +1,610 @@
+/*
+ * ENHANCED ROBLOX EXTERNAL - C++
+ * Improved attachment, error handling, and structure
+ * Compile: g++ -o RobloxExternal.exe main.cpp -std=c++17 -O2
+ */
+
+#include <Windows.h>
+#include <TlHelp32.h>
+#include <iostream>
+#include <vector>
+#include <string>
+#include <thread>
+#include <chrono>
+
+// ============================================================================
+// MEMORY CLASS - Enhanced memory operations
+// ============================================================================
+
+class Memory {
+private:
+    HANDLE hProcess;
+    DWORD processID;
+    uintptr_t baseAddress;
+    std::string processName;
+    bool attached;
+
+public:
+    Memory() : hProcess(NULL), processID(0), baseAddress(0), attached(false) {}
+    
+    ~Memory() {
+        if (hProcess) {
+            CloseHandle(hProcess);
+        }
+    }
+
+    // Get process ID by name
+    DWORD GetProcessID(const std::string& procName) {
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) {
+            return 0;
+        }
+
+        PROCESSENTRY32 entry;
+        entry.dwSize = sizeof(PROCESSENTRY32);
+
+        if (Process32First(snapshot, &entry)) {
+            do {
+                if (procName == entry.szExeFile) {
+                    CloseHandle(snapshot);
+                    return entry.th32ProcessID;
+                }
+            } while (Process32Next(snapshot, &entry));
+        }
+
+        CloseHandle(snapshot);
+        return 0;
+    }
+
+    // Get module base address
+    uintptr_t GetModuleBase(const std::string& moduleName) {
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, processID);
+        if (snapshot == INVALID_HANDLE_VALUE) {
+            return 0;
+        }
+
+        MODULEENTRY32 entry;
+        entry.dwSize = sizeof(MODULEENTRY32);
+
+        if (Module32First(snapshot, &entry)) {
+            do {
+                if (moduleName == entry.szModule) {
+                    CloseHandle(snapshot);
+                    return reinterpret_cast<uintptr_t>(entry.modBaseAddr);
+                }
+            } while (Module32Next(snapshot, &entry));
+        }
+
+        CloseHandle(snapshot);
+        return 0;
+    }
+
+    // Attach to process with retries
+    bool Attach(const std::string& procName, int maxRetries = 5) {
+        processName = procName;
+        
+        std::cout << "[INFO] Searching for " << procName << "...\n";
+
+        for (int i = 0; i < maxRetries; i++) {
+            processID = GetProcessID(procName);
+            
+            if (processID != 0) {
+                std::cout << "[SUCCESS] Found process! PID: " << processID << "\n";
+                
+                // Open process with necessary permissions
+                hProcess = OpenProcess(
+                    PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION,
+                    FALSE,
+                    processID
+                );
+
+                if (hProcess == NULL) {
+                    std::cout << "[ERROR] Failed to open process. Error code: " << GetLastError() << "\n";
+                    std::cout << "[TIP] Try running as Administrator\n";
+                    return false;
+                }
+
+                // Get base address
+                baseAddress = GetModuleBase(procName);
+                if (baseAddress == 0) {
+                    std::cout << "[ERROR] Failed to get base address\n";
+                    return false;
+                }
+
+                std::cout << "[SUCCESS] Attached successfully!\n";
+                std::cout << "[INFO] Base Address: 0x" << std::hex << baseAddress << std::dec << "\n\n";
+                attached = true;
+                return true;
+            }
+
+            std::cout << "[RETRY] Attempt " << (i + 1) << "/" << maxRetries << "...\n";
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
+
+        std::cout << "[ERROR] Could not find " << procName << "\n";
+        std::cout << "[TIP] Make sure Roblox is running\n";
+        return false;
+    }
+
+    // Check if still attached
+    bool IsAttached() {
+        if (!attached || hProcess == NULL) {
+            return false;
+        }
+
+        DWORD exitCode;
+        if (GetExitCodeProcess(hProcess, &exitCode)) {
+            if (exitCode != STILL_ACTIVE) {
+                std::cout << "[WARNING] Process has been closed\n";
+                attached = false;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Read memory - template for any type
+    template<typename T>
+    T Read(uintptr_t address) {
+        if (!IsAttached()) {
+            std::cout << "[ERROR] Not attached to process\n";
+            return T();
+        }
+
+        T value{};
+        SIZE_T bytesRead;
+        
+        if (!ReadProcessMemory(hProcess, reinterpret_cast<LPCVOID>(address), &value, sizeof(T), &bytesRead)) {
+            std::cout << "[ERROR] Read failed at 0x" << std::hex << address << std::dec << "\n";
+            return T();
+        }
+
+        return value;
+    }
+
+    // Write memory - template for any type
+    template<typename T>
+    bool Write(uintptr_t address, T value) {
+        if (!IsAttached()) {
+            std::cout << "[ERROR] Not attached to process\n";
+            return false;
+        }
+
+        SIZE_T bytesWritten;
+        
+        if (!WriteProcessMemory(hProcess, reinterpret_cast<LPVOID>(address), &value, sizeof(T), &bytesWritten)) {
+            std::cout << "[ERROR] Write failed at 0x" << std::hex << address << std::dec 
+                      << " Error: " << GetLastError() << "\n";
+            return false;
+        }
+
+        return true;
+    }
+
+    // Read pointer chain
+    uintptr_t ReadChain(uintptr_t base, const std::vector<uintptr_t>& offsets) {
+        uintptr_t address = base;
+        
+        for (size_t i = 0; i < offsets.size() - 1; i++) {
+            address = Read<uintptr_t>(address + offsets[i]);
+            if (address == 0) {
+                std::cout << "[ERROR] Null pointer at offset " << i << "\n";
+                return 0;
+            }
+        }
+        
+        return address + offsets.back();
+    }
+
+    // Read string
+    std::string ReadString(uintptr_t address, size_t length = 50) {
+        if (!IsAttached()) return "";
+
+        std::vector<char> buffer(length);
+        SIZE_T bytesRead;
+        
+        if (ReadProcessMemory(hProcess, reinterpret_cast<LPCVOID>(address), buffer.data(), length, &bytesRead)) {
+            buffer[bytesRead] = '\0';
+            return std::string(buffer.data());
+        }
+
+        return "";
+    }
+
+    // Getters
+    uintptr_t GetBase() const { return baseAddress; }
+    DWORD GetPID() const { return processID; }
+    HANDLE GetHandle() const { return hProcess; }
+};
+
+// ============================================================================
+// VECTOR3 - For positions
+// ============================================================================
+
+struct Vector3 {
+    float x, y, z;
+    
+    Vector3() : x(0), y(0), z(0) {}
+    Vector3(float x, float y, float z) : x(x), y(y), z(z) {}
+    
+    void Print() const {
+        std::cout << "(" << x << ", " << y << ", " << z << ")";
+    }
+};
+
+// ============================================================================
+// OFFSETS - Update these with Cheat Engine
+// ============================================================================
+
+namespace Offsets {
+    // PLACEHOLDER OFFSETS - FIND THESE WITH CHEAT ENGINE
+    namespace Pointers {
+        constexpr uintptr_t LocalPlayer = 0x0;
+    }
+    
+    namespace Player {
+        constexpr uintptr_t Character = 0x48;
+        constexpr uintptr_t Name = 0x28;
+    }
+    
+    namespace Character {
+        constexpr uintptr_t Humanoid = 0x2E8;
+        constexpr uintptr_t RootPart = 0x2F0;
+    }
+    
+    namespace Humanoid {
+        constexpr uintptr_t Health = 0x1D0;
+        constexpr uintptr_t MaxHealth = 0x1D8;
+        constexpr uintptr_t WalkSpeed = 0x48;
+        constexpr uintptr_t JumpPower = 0x50;
+    }
+    
+    namespace Part {
+        constexpr uintptr_t Position = 0x11C;
+        constexpr uintptr_t CanCollide = 0x88;
+    }
+}
+
+// ============================================================================
+// ROBLOX - Feature implementations
+// ============================================================================
+
+class Roblox {
+private:
+    Memory* mem;
+    bool running;
+
+public:
+    Roblox(Memory* memory) : mem(memory), running(true) {}
+
+    uintptr_t GetLocalPlayer() {
+        uintptr_t localPlayerPtr = mem->GetBase() + Offsets::Pointers::LocalPlayer;
+        return mem->Read<uintptr_t>(localPlayerPtr);
+    }
+
+    uintptr_t GetCharacter() {
+        uintptr_t player = GetLocalPlayer();
+        if (player == 0) return 0;
+        return mem->Read<uintptr_t>(player + Offsets::Player::Character);
+    }
+
+    uintptr_t GetHumanoid() {
+        uintptr_t character = GetCharacter();
+        if (character == 0) return 0;
+        return mem->Read<uintptr_t>(character + Offsets::Character::Humanoid);
+    }
+
+    uintptr_t GetRootPart() {
+        uintptr_t character = GetCharacter();
+        if (character == 0) return 0;
+        return mem->Read<uintptr_t>(character + Offsets::Character::RootPart);
+    }
+
+    // Speed hack
+    void SetSpeed(float speed) {
+        uintptr_t humanoid = GetHumanoid();
+        if (humanoid == 0) {
+            std::cout << "[ERROR] Could not find Humanoid\n";
+            return;
+        }
+
+        if (mem->Write<float>(humanoid + Offsets::Humanoid::WalkSpeed, speed)) {
+            std::cout << "[SUCCESS] Speed set to " << speed << "\n";
+        }
+    }
+
+    // Jump power
+    void SetJumpPower(float power) {
+        uintptr_t humanoid = GetHumanoid();
+        if (humanoid == 0) {
+            std::cout << "[ERROR] Could not find Humanoid\n";
+            return;
+        }
+
+        if (mem->Write<float>(humanoid + Offsets::Humanoid::JumpPower, power)) {
+            std::cout << "[SUCCESS] Jump power set to " << power << "\n";
+        }
+    }
+
+    // Health
+    void SetHealth(float health) {
+        uintptr_t humanoid = GetHumanoid();
+        if (humanoid == 0) {
+            std::cout << "[ERROR] Could not find Humanoid\n";
+            return;
+        }
+
+        if (mem->Write<float>(humanoid + Offsets::Humanoid::Health, health)) {
+            std::cout << "[SUCCESS] Health set to " << health << "\n";
+        }
+    }
+
+    float GetHealth() {
+        uintptr_t humanoid = GetHumanoid();
+        if (humanoid == 0) return 0.0f;
+        return mem->Read<float>(humanoid + Offsets::Humanoid::Health);
+    }
+
+    // God mode (auto heal)
+    void GodMode() {
+        std::cout << "[GOD MODE] Started (press any key to stop)\n";
+        
+        while (!_kbhit()) {
+            SetHealth(100.0f);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        _getch(); // Clear the key press
+        
+        std::cout << "[GOD MODE] Stopped\n";
+    }
+
+    // Teleport
+    void Teleport(float x, float y, float z) {
+        uintptr_t rootPart = GetRootPart();
+        if (rootPart == 0) {
+            std::cout << "[ERROR] Could not find RootPart\n";
+            return;
+        }
+
+        Vector3 pos(x, y, z);
+        if (mem->Write<Vector3>(rootPart + Offsets::Part::Position, pos)) {
+            std::cout << "[SUCCESS] Teleported to ";
+            pos.Print();
+            std::cout << "\n";
+        }
+    }
+
+    // Get position
+    Vector3 GetPosition() {
+        uintptr_t rootPart = GetRootPart();
+        if (rootPart == 0) return Vector3();
+        return mem->Read<Vector3>(rootPart + Offsets::Part::Position);
+    }
+
+    // NoClip
+    void NoClip(bool enable) {
+        uintptr_t rootPart = GetRootPart();
+        if (rootPart == 0) {
+            std::cout << "[ERROR] Could not find RootPart\n";
+            return;
+        }
+
+        if (mem->Write<bool>(rootPart + Offsets::Part::CanCollide, !enable)) {
+            std::cout << "[NOCLIP] " << (enable ? "Enabled" : "Disabled") << "\n";
+        }
+    }
+
+    void Stop() {
+        running = false;
+    }
+};
+
+// ============================================================================
+// MENU
+// ============================================================================
+
+void PrintMenu() {
+    std::cout << "\n========== ROBLOX EXTERNAL (C++) ==========\n";
+    std::cout << "[1] Set Speed\n";
+    std::cout << "[2] Set Jump Power\n";
+    std::cout << "[3] Set Health\n";
+    std::cout << "[4] God Mode (Auto-heal)\n";
+    std::cout << "[5] Teleport\n";
+    std::cout << "[6] Toggle NoClip\n";
+    std::cout << "[7] Show Position\n";
+    std::cout << "[8] Show Health\n";
+    std::cout << "[9] Reconnect to Roblox\n";
+    std::cout << "[0] Exit\n";
+    std::cout << "===========================================\n";
+    std::cout << "Choice: ";
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+int main() {
+    SetConsoleTitleA("Roblox External - C++");
+    
+    std::cout << "ROBLOX EXTERNAL CHEAT (C++)\n";
+    std::cout << "Enhanced version with better attachment\n\n";
+
+    Memory mem;
+    
+    // Attach to Roblox
+    if (!mem.Attach("RobloxPlayerBeta.exe", 10)) {
+        std::cout << "\nPress any key to exit...";
+        _getch();
+        return 1;
+    }
+
+    Roblox roblox(&mem);
+    
+    std::cout << "Press any key to open menu...\n";
+    _getch();
+
+    bool running = true;
+    while (running) {
+        system("cls");
+        
+        // Check if still attached
+        if (!mem.IsAttached()) {
+            std::cout << "[ERROR] Lost connection to Roblox\n";
+            std::cout << "[INFO] Attempting to reconnect...\n\n";
+            
+            if (!mem.Attach("RobloxPlayerBeta.exe", 5)) {
+                std::cout << "\nPress any key to exit...";
+                _getch();
+                return 1;
+            }
+        }
+
+        PrintMenu();
+        
+        int choice;
+        std::cin >> choice;
+        std::cin.ignore(); // Clear newline
+
+        switch (choice) {
+            case 1: {
+                float speed;
+                std::cout << "Enter speed (16 default, 50 fast): ";
+                std::cin >> speed;
+                roblox.SetSpeed(speed);
+                break;
+            }
+            
+            case 2: {
+                float jump;
+                std::cout << "Enter jump power (50 default, 200 high): ";
+                std::cin >> jump;
+                roblox.SetJumpPower(jump);
+                break;
+            }
+            
+            case 3: {
+                float health;
+                std::cout << "Enter health (0-100): ";
+                std::cin >> health;
+                roblox.SetHealth(health);
+                break;
+            }
+            
+            case 4: {
+                roblox.GodMode();
+                break;
+            }
+            
+            case 5: {
+                float x, y, z;
+                std::cout << "Enter X: ";
+                std::cin >> x;
+                std::cout << "Enter Y: ";
+                std::cin >> y;
+                std::cout << "Enter Z: ";
+                std::cin >> z;
+                roblox.Teleport(x, y, z);
+                break;
+            }
+            
+            case 6: {
+                char yn;
+                std::cout << "Enable NoClip? (y/n): ";
+                std::cin >> yn;
+                roblox.NoClip(yn == 'y' || yn == 'Y');
+                break;
+            }
+            
+            case 7: {
+                Vector3 pos = roblox.GetPosition();
+                std::cout << "Current position: ";
+                pos.Print();
+                std::cout << "\n";
+                break;
+            }
+            
+            case 8: {
+                float health = roblox.GetHealth();
+                std::cout << "Current health: " << health << "\n";
+                break;
+            }
+            
+            case 9: {
+                std::cout << "[INFO] Reconnecting...\n";
+                mem.Attach("RobloxPlayerBeta.exe", 5);
+                break;
+            }
+            
+            case 0: {
+                running = false;
+                break;
+            }
+            
+            default: {
+                std::cout << "[ERROR] Invalid choice\n";
+                break;
+            }
+        }
+
+        if (choice != 0) {
+            std::cout << "\nPress any key to continue...";
+            _getch();
+        }
+    }
+
+    std::cout << "\nExiting...\n";
+    return 0;
+}
+
+/*
+ * ============================================================================
+ * IMPROVEMENTS IN THIS VERSION
+ * ============================================================================
+ * 
+ * 1. BETTER ATTACHMENT
+ *    - Automatic retry mechanism
+ *    - Proper error messages
+ *    - Connection status checking
+ *    - Reconnection feature
+ * 
+ * 2. ERROR HANDLING
+ *    - Checks if process is still running
+ *    - Validates all memory operations
+ *    - Clear error messages with tips
+ * 
+ * 3. CLEANER CODE
+ *    - Better organization
+ *    - More comments
+ *    - Easier to modify
+ * 
+ * 4. ADDITIONAL FEATURES
+ *    - God mode with keyboard interrupt
+ *    - Position display
+ *    - Health display
+ *    - Manual reconnect option
+ * 
+ * ============================================================================
+ * COMPILATION
+ * ============================================================================
+ * 
+ * MinGW/GCC:
+ * g++ -o RobloxExternal.exe main.cpp -std=c++17 -O2 -static
+ * 
+ * Visual Studio:
+ * - Create new Console App (C++)
+ * - Copy this code
+ * - Build as x64 Release
+ * - Run as Administrator
+ * 
+ * ============================================================================
+ * USAGE
+ * ============================================================================
+ * 
+ * 1. Start Roblox first
+ * 2. Run this external as Administrator
+ * 3. It will automatically find and attach
+ * 4. Use the menu to activate features
+ * 
+ * REMEMBER: You still need to find offsets with Cheat Engine!
+ * 
+ * ============================================================================
