@@ -1,0 +1,583 @@
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Collections.Generic;
+using System.Linq;
+using System.Management;
+
+namespace AntiCheatSystem
+{
+    // ============================================================================
+    // NATIVE API IMPORTS
+    // ============================================================================
+    public static class NativeAPI
+    {
+        [DllImport("kernel32.dll")]
+        public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+
+        [DllImport("kernel32.dll")]
+        public static extern bool CloseHandle(IntPtr hObject);
+
+        [DllImport("kernel32.dll")]
+        public static extern bool IsDebuggerPresent();
+
+        [DllImport("kernel32.dll")]
+        public static extern bool CheckRemoteDebuggerPresent(IntPtr hProcess, ref bool isDebuggerPresent);
+
+        [DllImport("ntdll.dll")]
+        public static extern int NtQueryInformationProcess(IntPtr processHandle, int processInformationClass, 
+            ref PROCESS_BASIC_INFORMATION processInformation, int processInformationLength, out int returnLength);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct PROCESS_BASIC_INFORMATION
+        {
+            public IntPtr Reserved1;
+            public IntPtr PebBaseAddress;
+            public IntPtr Reserved2_0;
+            public IntPtr Reserved2_1;
+            public IntPtr UniqueProcessId;
+            public IntPtr InheritedFromUniqueProcessId;
+        }
+
+        public const uint PROCESS_QUERY_INFORMATION = 0x0400;
+        public const uint PROCESS_VM_READ = 0x0010;
+    }
+
+    // ============================================================================
+    // PROCESS MONITOR - Detects suspicious processes
+    // ============================================================================
+    public class ProcessMonitor
+    {
+        private List<string> suspiciousProcesses = new List<string>
+        {
+            "cheatengine",
+            "processhacker",
+            "x64dbg",
+            "x32dbg",
+            "ollydbg",
+            "ida",
+            "windbg",
+            "dnspy",
+            "pestudio",
+            "lordpe",
+            "importrec",
+            "wireshark",
+            "fiddler",
+            "httpdebugger"
+        };
+
+        public bool DetectSuspiciousProcesses()
+        {
+            try
+            {
+                Process[] processes = Process.GetProcesses();
+                foreach (Process proc in processes)
+                {
+                    string processName = proc.ProcessName.ToLower();
+                    
+                    foreach (string suspicious in suspiciousProcesses)
+                    {
+                        if (processName.Contains(suspicious))
+                        {
+                            Console.WriteLine($"[ALERT] Suspicious process detected: {proc.ProcessName}");
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ERROR] Process monitor: {ex.Message}");
+            }
+            
+            return false;
+        }
+
+        public List<string> GetSuspiciousHandles()
+        {
+            List<string> suspiciousHandles = new List<string>();
+            
+            try
+            {
+                Process currentProcess = Process.GetCurrentProcess();
+                int currentPid = currentProcess.Id;
+
+                Process[] allProcesses = Process.GetProcesses();
+                
+                foreach (Process proc in allProcesses)
+                {
+                    if (proc.Id == currentPid) continue;
+
+                    try
+                    {
+                        // Try to open handle to our process from other processes
+                        IntPtr handle = NativeAPI.OpenProcess(NativeAPI.PROCESS_QUERY_INFORMATION, false, currentPid);
+                        if (handle != IntPtr.Zero)
+                        {
+                            NativeAPI.CloseHandle(handle);
+                            // If another process can open us, it might be reading our memory
+                            suspiciousHandles.Add($"{proc.ProcessName} (PID: {proc.Id})");
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ERROR] Handle detection: {ex.Message}");
+            }
+
+            return suspiciousHandles;
+        }
+    }
+
+    // ============================================================================
+    // DEBUGGER DETECTOR - Detects attached debuggers
+    // ============================================================================
+    public class DebuggerDetector
+    {
+        public bool IsDebuggerAttached()
+        {
+            // Check 1: IsDebuggerPresent
+            if (NativeAPI.IsDebuggerPresent())
+            {
+                Console.WriteLine("[ALERT] Debugger detected via IsDebuggerPresent");
+                return true;
+            }
+
+            // Check 2: CheckRemoteDebuggerPresent
+            bool isRemoteDebugger = false;
+            IntPtr currentProcess = Process.GetCurrentProcess().Handle;
+            NativeAPI.CheckRemoteDebuggerPresent(currentProcess, ref isRemoteDebugger);
+            
+            if (isRemoteDebugger)
+            {
+                Console.WriteLine("[ALERT] Remote debugger detected");
+                return true;
+            }
+
+            // Check 3: Managed debugger
+            if (Debugger.IsAttached)
+            {
+                Console.WriteLine("[ALERT] Managed debugger detected");
+                return true;
+            }
+
+            return false;
+        }
+
+        public bool TimingCheck()
+        {
+            // Debuggers slow down execution significantly
+            Stopwatch sw = Stopwatch.StartNew();
+            
+            // Empty loop should be very fast
+            for (int i = 0; i < 1000; i++) { }
+            
+            sw.Stop();
+            
+            // If it takes too long, debugger might be attached
+            if (sw.ElapsedMilliseconds > 50)
+            {
+                Console.WriteLine($"[ALERT] Timing anomaly detected: {sw.ElapsedMilliseconds}ms");
+                return true;
+            }
+
+            return false;
+        }
+    }
+
+    // ============================================================================
+    // MEMORY INTEGRITY CHECKER - Detects memory modifications
+    // ============================================================================
+    public class MemoryIntegrityChecker
+    {
+        private Dictionary<string, int> checksums = new Dictionary<string, int>();
+
+        public void RegisterValue(string name, int value)
+        {
+            checksums[name] = GetChecksum(value);
+        }
+
+        public bool ValidateValue(string name, int value)
+        {
+            if (!checksums.ContainsKey(name))
+                return true;
+
+            int currentChecksum = GetChecksum(value);
+            if (currentChecksum != checksums[name])
+            {
+                Console.WriteLine($"[ALERT] Memory tampering detected for {name}");
+                return false;
+            }
+
+            return true;
+        }
+
+        private int GetChecksum(int value)
+        {
+            // Simple checksum - in production use proper encryption
+            return value ^ 0xDEADBEEF;
+        }
+
+        public bool CheckCodeIntegrity()
+        {
+            try
+            {
+                // Check if our own assembly has been modified
+                var assembly = System.Reflection.Assembly.GetExecutingAssembly();
+                byte[] assemblyBytes = System.IO.File.ReadAllBytes(assembly.Location);
+                
+                // Calculate hash (simplified)
+                int hash = 0;
+                for (int i = 0; i < Math.Min(assemblyBytes.Length, 10000); i++)
+                {
+                    hash = hash * 31 + assemblyBytes[i];
+                }
+
+                // Store first hash
+                if (!checksums.ContainsKey("_code_integrity"))
+                {
+                    checksums["_code_integrity"] = hash;
+                    return true;
+                }
+
+                // Verify hash hasn't changed
+                if (checksums["_code_integrity"] != hash)
+                {
+                    Console.WriteLine("[ALERT] Code integrity violation detected");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ERROR] Code integrity check: {ex.Message}");
+            }
+
+            return true;
+        }
+    }
+
+    // ============================================================================
+    // BEHAVIOR ANALYZER - Detects suspicious player behavior
+    // ============================================================================
+    public class BehaviorAnalyzer
+    {
+        private class PlayerStats
+        {
+            public float MaxSpeed = 0;
+            public float TotalDistance = 0;
+            public DateTime LastPosition = DateTime.Now;
+            public int SuspiciousActions = 0;
+        }
+
+        private Dictionary<int, PlayerStats> playerStats = new Dictionary<int, PlayerStats>();
+
+        public bool AnalyzeMovement(int playerId, float speed, float x, float y, float z)
+        {
+            if (!playerStats.ContainsKey(playerId))
+            {
+                playerStats[playerId] = new PlayerStats();
+            }
+
+            PlayerStats stats = playerStats[playerId];
+
+            // Check for impossible speed
+            if (speed > 100) // Assuming max legit speed is 100
+            {
+                stats.SuspiciousActions++;
+                Console.WriteLine($"[ALERT] Player {playerId} has impossible speed: {speed}");
+                return true;
+            }
+
+            // Track max speed for statistical analysis
+            if (speed > stats.MaxSpeed)
+            {
+                stats.MaxSpeed = speed;
+            }
+
+            // Check for teleportation
+            TimeSpan timeDiff = DateTime.Now - stats.LastPosition;
+            if (timeDiff.TotalSeconds < 0.1f && stats.TotalDistance > 1000)
+            {
+                stats.SuspiciousActions++;
+                Console.WriteLine($"[ALERT] Player {playerId} possible teleportation detected");
+                return true;
+            }
+
+            stats.LastPosition = DateTime.Now;
+
+            // Too many suspicious actions = cheater
+            if (stats.SuspiciousActions > 5)
+            {
+                Console.WriteLine($"[BAN] Player {playerId} exceeded suspicious action threshold");
+                return true;
+            }
+
+            return false;
+        }
+
+        public bool DetectAimbot(int playerId, float accuracy)
+        {
+            // If accuracy is too perfect, might be aimbot
+            if (accuracy > 95.0f)
+            {
+                Console.WriteLine($"[ALERT] Player {playerId} has suspicious accuracy: {accuracy}%");
+                return true;
+            }
+
+            return false;
+        }
+    }
+
+    // ============================================================================
+    // ANTI-CHEAT ENGINE - Main coordinator
+    // ============================================================================
+    public class AntiCheatEngine
+    {
+        private ProcessMonitor processMonitor;
+        private DebuggerDetector debuggerDetector;
+        private MemoryIntegrityChecker memoryChecker;
+        private BehaviorAnalyzer behaviorAnalyzer;
+        private bool running = true;
+
+        public AntiCheatEngine()
+        {
+            processMonitor = new ProcessMonitor();
+            debuggerDetector = new DebuggerDetector();
+            memoryChecker = new MemoryIntegrityChecker();
+            behaviorAnalyzer = new BehaviorAnalyzer();
+        }
+
+        public void Start()
+        {
+            Console.WriteLine("[ANTI-CHEAT] Starting protection...\n");
+
+            // Start monitoring thread
+            Thread monitorThread = new Thread(MonitoringLoop);
+            monitorThread.IsBackground = true;
+            monitorThread.Start();
+        }
+
+        private void MonitoringLoop()
+        {
+            while (running)
+            {
+                // Check for suspicious processes
+                if (processMonitor.DetectSuspiciousProcesses())
+                {
+                    OnCheatDetected("Suspicious process detected");
+                }
+
+                // Check for debuggers
+                if (debuggerDetector.IsDebuggerAttached())
+                {
+                    OnCheatDetected("Debugger attached");
+                }
+
+                // Timing check
+                if (debuggerDetector.TimingCheck())
+                {
+                    OnCheatDetected("Timing anomaly detected");
+                }
+
+                // Check code integrity
+                if (!memoryChecker.CheckCodeIntegrity())
+                {
+                    OnCheatDetected("Code integrity violation");
+                }
+
+                Thread.Sleep(5000); // Check every 5 seconds
+            }
+        }
+
+        public void RegisterProtectedValue(string name, int value)
+        {
+            memoryChecker.RegisterValue(name, value);
+        }
+
+        public bool ValidateProtectedValue(string name, int value)
+        {
+            return memoryChecker.ValidateValue(name, value);
+        }
+
+        public bool CheckPlayerBehavior(int playerId, float speed, float x, float y, float z)
+        {
+            return behaviorAnalyzer.AnalyzeMovement(playerId, speed, x, y, z);
+        }
+
+        private void OnCheatDetected(string reason)
+        {
+            Console.WriteLine($"\n[!!!] CHEAT DETECTED: {reason}");
+            Console.WriteLine("[!!!] Taking action...\n");
+            
+            // In a real game, you would:
+            // - Log the incident
+            // - Ban the player
+            // - Close the game
+            // - Send data to server
+        }
+
+        public void Stop()
+        {
+            running = false;
+        }
+    }
+
+    // ============================================================================
+    // DEMO GAME - Example integration
+    // ============================================================================
+    public class GameExample
+    {
+        private AntiCheatEngine antiCheat;
+        private int playerHealth = 100;
+        private float playerSpeed = 16.0f;
+
+        public GameExample()
+        {
+            antiCheat = new AntiCheatEngine();
+        }
+
+        public void Start()
+        {
+            Console.WriteLine("=== GAME WITH ANTI-CHEAT DEMO ===\n");
+            
+            // Start anti-cheat protection
+            antiCheat.Start();
+
+            // Register protected values
+            antiCheat.RegisterProtectedValue("health", playerHealth);
+            antiCheat.RegisterProtectedValue("speed", (int)playerSpeed);
+
+            Console.WriteLine("[GAME] Game started with anti-cheat protection");
+            Console.WriteLine("[GAME] Try running Cheat Engine or debugger...\n");
+
+            // Game loop
+            while (true)
+            {
+                Console.WriteLine("\n--- GAME MENU ---");
+                Console.WriteLine("[1] Show Status");
+                Console.WriteLine("[2] Simulate Damage");
+                Console.WriteLine("[3] Simulate Speed Change");
+                Console.WriteLine("[4] Check for Cheats");
+                Console.WriteLine("[5] Simulate Player Movement");
+                Console.WriteLine("[0] Exit");
+                Console.Write("Choice: ");
+
+                string input = Console.ReadLine();
+                if (!int.TryParse(input, out int choice))
+                    continue;
+
+                switch (choice)
+                {
+                    case 1:
+                        Console.WriteLine($"\nHealth: {playerHealth}");
+                        Console.WriteLine($"Speed: {playerSpeed}");
+                        break;
+
+                    case 2:
+                        playerHealth -= 10;
+                        Console.WriteLine($"\nTook damage! Health: {playerHealth}");
+                        
+                        // Validate integrity
+                        if (!antiCheat.ValidateProtectedValue("health", playerHealth))
+                        {
+                            Console.WriteLine("[ALERT] Health value was tampered with!");
+                        }
+                        break;
+
+                    case 3:
+                        Console.Write("Enter new speed: ");
+                        if (float.TryParse(Console.ReadLine(), out float newSpeed))
+                        {
+                            playerSpeed = newSpeed;
+                            Console.WriteLine($"Speed changed to: {playerSpeed}");
+                        }
+                        break;
+
+                    case 4:
+                        Console.WriteLine("\n[SCAN] Running manual cheat detection...");
+                        ProcessMonitor pm = new ProcessMonitor();
+                        pm.DetectSuspiciousProcesses();
+                        
+                        DebuggerDetector dd = new DebuggerDetector();
+                        dd.IsDebuggerAttached();
+                        dd.TimingCheck();
+                        break;
+
+                    case 5:
+                        Console.WriteLine("\n[BEHAVIOR] Simulating player movement...");
+                        Random rand = new Random();
+                        
+                        for (int i = 0; i < 5; i++)
+                        {
+                            float speed = playerSpeed + rand.Next(-5, 5);
+                            float x = rand.Next(0, 100);
+                            float y = rand.Next(0, 100);
+                            float z = rand.Next(0, 100);
+                            
+                            bool suspicious = antiCheat.CheckPlayerBehavior(1, speed, x, y, z);
+                            Console.WriteLine($"Movement {i+1}: Speed={speed:F1}, Pos=({x:F1},{y:F1},{z:F1}) - {(suspicious ? "SUSPICIOUS" : "OK")}");
+                            Thread.Sleep(100);
+                        }
+                        break;
+
+                    case 0:
+                        antiCheat.Stop();
+                        return;
+                }
+            }
+        }
+    }
+
+    // ============================================================================
+    // MAIN PROGRAM
+    // ============================================================================
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            Console.Title = "Anti-Cheat System Demo";
+            
+            GameExample game = new GameExample();
+            game.Start();
+
+            Console.WriteLine("\nExiting...");
+        }
+    }
+}
+
+/*
+ * ============================================================================
+ * HOW THIS ANTI-CHEAT WORKS
+ * ============================================================================
+ * 
+ * 1. PROCESS MONITORING
+ *    - Scans for known cheat tools (Cheat Engine, debuggers, etc.)
+ *    - Detects processes trying to open handles to the game
+ * 
+ * 2. DEBUGGER DETECTION
+ *    - Multiple detection methods (IsDebuggerPresent, timing checks)
+ *    - Catches both native and managed debuggers
+ * 
+ * 3. MEMORY INTEGRITY
+ *    - Checksums for important values (health, speed, etc.)
+ *    - Code integrity verification
+ *    - Detects memory tampering
+ * 
+ * 4. BEHAVIOR ANALYSIS
+ *    - Tracks player statistics (speed, movement patterns)
+ *    - Detects impossible actions (teleportation, super speed)
+ *    - Statistical anomaly detection
+ * 
+ * ============================================================================
+ * TESTING THIS ANTI-CHEAT
+ * ============================================================================
+ * 
+ * 1. Run this program normally - it should work fine
+ * 2. Run with a debugger attached - it will detect it
+ * 3. Open Cheat Engine while running - it will detect it
+ * 4. Try to modify memory values - checksums will catch it
+ * 5. Simulate impossible speeds - behavior analysis catches it
+ *
