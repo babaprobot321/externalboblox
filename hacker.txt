@@ -1,0 +1,24 @@
+
+create database sirketdb;
+
+use sirketdb;
+create table personel(
+personel_id int primary key auto_increment,
+adsoyad varchar (30) not null,
+cinsiyet varchar (10) not null,
+departman varchar (30) not null,
+giriscikis_tarihi date not null,
+maas decimal (7,2) not null,
+eposta varchar (30) not null
+);
+
+
+
+
+insert into personel(adsoyad, cinsiyet, departman, giriscikis_tarihi, maas, eposta)
+VALUES("arzu Y.","K","satıs","2021-01-01",9200,"artuyildirim@ornek.com")
+
+
+data export-----
+server data export.
+ 

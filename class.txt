@@ -1,0 +1,29 @@
+using System;
+
+public class Personel
+{
+    public string adisoyadi;
+    public string departman;
+    public int gunsayisi;
+    public double maas;
+
+    // Kurucu Method
+    public Personel(string a, string b, int c, double d)
+    {
+        adisoyadi = a;
+        departman = b;
+        gunsayisi = c;
+        maas = d;
+    }
+
+    // ZamYap Metodu
+    internal void ZamYap(int v)
+    {
+        maas = maas + v;
+    }
+
+    public override string ToString()
+    {
+        return adisoyadi;
+    }
+}

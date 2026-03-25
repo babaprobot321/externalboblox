@@ -1,0 +1,68 @@
+using System;
+using System.Collections;
+using System.Windows.Forms;
+
+public partial class Form1 : Form
+{
+    ArrayList liste = new ArrayList();
+
+    public Form1()
+    {
+        InitializeComponent();
+    }
+
+    // Yeni Personel Kaydı Ekle - Button1
+    private void button1_Click(object sender, EventArgs e)
+    {
+        Personel yeni = new Personel(
+            textBox1.Text,
+            textBox2.Text,
+            Convert.ToInt32(textBox3.Text),
+            Convert.ToDouble(textBox4.Text)
+        );
+
+        listBox1.Items.Add(yeni.adisoyadi);
+        liste.Add(yeni);
+    }
+
+    // Emeklilik Durumu Kontrol Et - Button2
+    private void button2_Click(object sender, EventArgs e)
+    {
+        if (Convert.ToInt32(textBox3.Text) >= 5000)
+        {
+            label7.Text = "Emekliliğe Hak Kazandı";
+        }
+        else
+        {
+            int kalangun = 5000 - Convert.ToInt32(textBox3.Text);
+            label7.Text = "Kalan Gün: " + kalangun.ToString();
+        }
+    }
+
+    // Maaşa 10000 Zam Yap - Button3
+    private void button3_Click(object sender, EventArgs e)
+    {
+        string aranan = textBox1.Text;
+
+        foreach (Personel personel in liste)
+        {
+            if (aranan == personel.adisoyadi)
+            {
+                personel.ZamYap(10000);
+                textBox4.Text = personel.maas.ToString();
+            }
+        }
+    }
+
+    // ListBox'tan Seçilince TextBox'lara Doldur
+    private void listBox1_SelectedIndexChanged(object sender, EventArgs e)
+    {
+        int aranan = listBox1.SelectedIndex;
+        Personel bulunan = (Personel)liste[aranan];
+
+        textBox1.Text = bulunan.adisoyadi;
+        textBox2.Text = bulunan.departman;
+        textBox3.Text = bulunan.gunsayisi.ToString();
+        textBox4.Text = bulunan.maas.ToString();
+    }
+}
